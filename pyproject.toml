@@ -1,0 +1,19 @@
+[project]
+name = "ees-neural-sde2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "equinox>=0.13.6",
+    "jax[cuda]>=0.9.2",
+    "georax",
+    "cyreal",
+    "yfinance>=1.2.0",
+    "matplotlib>=3.10.8",
+    "fastparquet>=2026.3.0",
+]
+
+[tool.uv.sources]
+georax = { git = "https://github.com/luke-a-thompson/georax.git" }
+cyreal = { git = "https://github.com/luke-a-thompson/cyreal_dynamics.git", branch = "master" }
