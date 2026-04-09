@@ -1,4 +1,3 @@
-import diffrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -27,6 +26,22 @@ class DriftField(eqx.Module):
     mlp: eqx.nn.MLP
     geometry: SPD
 
+    def __init__(self, geometry, state_dim, ctx_dim, hidden_dim, *, key):
+        mlp = eqx.nn.MLP(
+            in_size=state_dim + ctx_dim,
+            out_size=geometry.dimension,
+            width_size=hidden_dim,
+            depth=3,
+            activation=jax.nn.silu,
+            key=key,
+        )
+        last = mlp.layers[-1]
+        last = eqx.tree_at(lambda l: l.weight, last, last.weight * 0.001)
+        last = eqx.tree_at(lambda l: l.bias, last, jnp.zeros_like(last.bias))
+
+        self.mlp = eqx.tree_at(lambda m: m.layers[-1], mlp, last)
+        self.geometry = geometry
+
     def _state_features(self, sigma):
         return jnp.reshape(sym(sigma), (-1,))
 
@@ -44,6 +59,32 @@ class DiffusionField(eqx.Module):
     mlp: eqx.nn.MLP
     geometry: SPD
     diffusion_scale: float
+
+    def __init__(
+        self,
+        geometry,
+        state_dim,
+        ctx_dim,
+        hidden_dim,
+        diffusion_scale,
+        *,
+        key,
+    ):
+        mlp = eqx.nn.MLP(
+            in_size=state_dim + ctx_dim,
+            out_size=geometry.dimension,
+            width_size=hidden_dim,
+            depth=2,
+            activation=jax.nn.silu,
+            key=key,
+        )
+        last = mlp.layers[-1]
+        last = eqx.tree_at(lambda l: l.weight, last, last.weight * 0.001)
+        last = eqx.tree_at(lambda l: l.bias, last, jnp.full_like(last.bias, -3.0))
+
+        self.mlp = eqx.tree_at(lambda m: m.layers[-1], mlp, last)
+        self.geometry = geometry
+        self.diffusion_scale = diffusion_scale
 
     def _state_features(self, sigma):
         return jnp.reshape(sym(sigma), (-1,))
@@ -88,6 +129,7 @@ class ManifoldNeuralSDE(eqx.Module):
     encoder: GRUEncoder
     drift_field: DriftField
     diffusion_field: DiffusionField
+    name: str = eqx.field(static=True)
 
     n: int = eqx.field(static=True)
     d: int = eqx.field(static=True)
@@ -115,6 +157,7 @@ class ManifoldNeuralSDE(eqx.Module):
         d = geometry.dimension
         state_dim = n_stocks * n_stocks
 
+        self.name = "neural_sde"
         self.n = n_stocks
         self.d = d
         self.state_dim = state_dim
@@ -125,43 +168,20 @@ class ManifoldNeuralSDE(eqx.Module):
 
         self.encoder = GRUEncoder(state_dim, hidden_dim, ctx_dim, key=k1)
 
-        drift_mlp = eqx.nn.MLP(
-            in_size=state_dim + ctx_dim,
-            out_size=d,
-            width_size=hidden_dim,
-            depth=3,
-            activation=jax.nn.silu,
+        self.drift_field = DriftField(
+            geometry=geometry,
+            state_dim=state_dim,
+            ctx_dim=ctx_dim,
+            hidden_dim=hidden_dim,
             key=k2,
         )
-        drift_last = drift_mlp.layers[-1]
-        drift_last = eqx.tree_at(
-            lambda l: l.weight, drift_last, drift_last.weight * 0.001
-        )
-        drift_last = eqx.tree_at(
-            lambda l: l.bias, drift_last, jnp.zeros_like(drift_last.bias)
-        )
-        drift_mlp = eqx.tree_at(lambda m: m.layers[-1], drift_mlp, drift_last)
-
-        diff_mlp = eqx.nn.MLP(
-            in_size=state_dim + ctx_dim,
-            out_size=d,
-            width_size=hidden_dim,
-            depth=2,
-            activation=jax.nn.silu,
-            key=k3,
-        )
-        diff_last = diff_mlp.layers[-1]
-        diff_last = eqx.tree_at(lambda l: l.weight, diff_last, diff_last.weight * 0.001)
-        diff_last = eqx.tree_at(
-            lambda l: l.bias, diff_last, jnp.full_like(diff_last.bias, -3.0)
-        )
-        diff_mlp = eqx.tree_at(lambda m: m.layers[-1], diff_mlp, diff_last)
-
-        self.drift_field = DriftField(mlp=drift_mlp, geometry=geometry)
         self.diffusion_field = DiffusionField(
-            mlp=diff_mlp,
             geometry=geometry,
+            state_dim=state_dim,
+            ctx_dim=ctx_dim,
+            hidden_dim=hidden_dim,
             diffusion_scale=diffusion_scale,
+            key=k3,
         )
 
     def _state_features(self, sigma):

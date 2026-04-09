@@ -12,7 +12,19 @@ dependencies = [
     "yfinance>=1.2.0",
     "matplotlib>=3.10.8",
     "fastparquet>=2026.3.0",
+    "seali>=0.2.0",
 ]
+
+[project.scripts]
+train = "experiment.train:main"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "experiment"
 
 [tool.uv.sources]
 georax = { git = "https://github.com/luke-a-thompson/georax.git" }
