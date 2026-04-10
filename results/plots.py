@@ -18,35 +18,6 @@ plt.rcParams.update({
 })
 
 
-def _to_numpy(array):
-    if hasattr(array, "detach"):
-        array = array.detach()
-    if hasattr(array, "cpu"):
-        array = array.cpu()
-    if hasattr(array, "numpy"):
-        return array.numpy()
-    return np.asarray(array)
-
-
-def plot_cumulative_returns(
-    backtest_results: dict[str, dict],
-    save_path: Path,
-) -> None:
-    """Cumulative portfolio returns for all models on one plot."""
-    fig, ax = plt.subplots()
-    for name, res in backtest_results.items():
-        cum_ret = _to_numpy(res["cumulative_returns"])
-        ax.plot(cum_ret, label=name, linewidth=1.2)
-
-    ax.set_xlabel("Trading Day")
-    ax.set_ylabel("Cumulative Return")
-    ax.set_title("GMV Portfolio: Cumulative Returns")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.savefig(save_path)
-    plt.close(fig)
-
-
 def plot_riemannian_distance(
     distances: dict[str, np.ndarray],
     save_path: Path,
@@ -54,7 +25,7 @@ def plot_riemannian_distance(
     """Per-day Riemannian distance for all models."""
     fig, ax = plt.subplots()
     for name, d in distances.items():
-        d = _to_numpy(d)
+        d = np.asarray(d)
         # Rolling average for readability
         window = min(20, len(d) // 5)
         if window > 1:
@@ -79,8 +50,8 @@ def plot_eigenvalue_spectrum(
     model_name: str = "Model",
 ) -> None:
     """Compare eigenvalue distributions of predicted vs actual covariances."""
-    predicted = _to_numpy(predicted)
-    actual = _to_numpy(actual)
+    predicted = np.asarray(predicted)
+    actual = np.asarray(actual)
     eigs_pred = np.linalg.eigvalsh(predicted).flatten()
     eigs_actual = np.linalg.eigvalsh(actual).flatten()
 
@@ -107,9 +78,9 @@ def plot_training_curves(
         train_values = hist.get("train_loss", hist.get("train"))
         val_values = hist.get("val_riemannian_dist", hist.get("val_loss", hist.get("val")))
         if train_values:
-            axes[0].plot(_to_numpy(train_values), label=name, linewidth=1.2)
+            axes[0].plot(np.asarray(train_values), label=name, linewidth=1.2)
         if val_values:
-            axes[1].plot(_to_numpy(val_values), label=name, linewidth=1.2)
+            axes[1].plot(np.asarray(val_values), label=name, linewidth=1.2)
 
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Training Loss")

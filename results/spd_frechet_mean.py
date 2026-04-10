@@ -7,37 +7,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.linalg import eigh
 
 from datasets.spd.dataset import CovarianceDataset
-from datasets.spd.download import DEFAULT_TICKERS
 
 # ---------------------------------------------------------------------------
 # Geometry helpers (affine-invariant metric on SPD)
 # ---------------------------------------------------------------------------
 
 
-def _eigh_clamp(M: np.ndarray, eps: float = 1e-10) -> tuple[np.ndarray, np.ndarray]:
-    n = M.shape[-1]
-    lam, Q = eigh(M + eps * np.eye(n))
-    return np.maximum(lam, eps), Q
-
-
-def spd_sqrt_inv_sqrt(S: np.ndarray, eps: float = 1e-10):
-    lam, Q = _eigh_clamp(S, eps)
-    sqrt_S = (Q * np.sqrt(lam)) @ Q.T
-    inv_sqrt_S = (Q * (1.0 / np.sqrt(lam))) @ Q.T
-    return sqrt_S, inv_sqrt_S
-
-
 def logmap(base: np.ndarray, target: np.ndarray) -> np.ndarray:
     """Log_base(target) under the affine-invariant metric."""
-    sqrt_B, inv_sqrt_B = spd_sqrt_inv_sqrt(base)
-    M = inv_sqrt_B @ target @ inv_sqrt_B
-    M = 0.5 * (M + M.T)
-    lam, Q = _eigh_clamp(M)
-    log_M = (Q * np.log(lam)) @ Q.T
-    tangent = sqrt_B @ log_M @ sqrt_B
+    lam, Q = np.linalg.eigh(base)
+    sqrt_B = (Q * np.sqrt(lam)) @ Q.T
+    inv_sqrt_B = (Q * (1.0 / np.sqrt(lam))) @ Q.T
+    lam, Q = np.linalg.eigh(inv_sqrt_B @ target @ inv_sqrt_B)
+    tangent = sqrt_B @ ((Q * np.log(lam)) @ Q.T) @ sqrt_B
     return 0.5 * (tangent + tangent.T)
 
 
@@ -46,21 +30,17 @@ def frechet_mean(
 ) -> np.ndarray:
     """Karcher mean on SPD via Riemannian gradient descent."""
     M = matrices.mean(axis=0)
-    M = 0.5 * (M + M.T)
     for _ in range(max_iter):
         tangents = np.stack([logmap(M, A) for A in matrices])
         V = tangents.mean(axis=0)
-        norm_V = np.linalg.norm(V, "fro")
-        if norm_V < tol:
+        if np.linalg.norm(V, "fro") < tol:
             break
-        # Exp_M(V)
-        sqrt_M, inv_sqrt_M = spd_sqrt_inv_sqrt(M)
+        lam, Q = np.linalg.eigh(M)
+        sqrt_M = (Q * np.sqrt(lam)) @ Q.T
+        inv_sqrt_M = (Q * (1.0 / np.sqrt(lam))) @ Q.T
         W = inv_sqrt_M @ V @ inv_sqrt_M
-        W = 0.5 * (W + W.T)
-        lam, Q = eigh(W)
-        exp_W = (Q * np.exp(lam)) @ Q.T
-        M = sqrt_M @ exp_W @ sqrt_M
-        M = 0.5 * (M + M.T)
+        lam, Q = np.linalg.eigh(W)
+        M = sqrt_M @ ((Q * np.exp(lam)) @ Q.T) @ sqrt_M
     return M
 
 
