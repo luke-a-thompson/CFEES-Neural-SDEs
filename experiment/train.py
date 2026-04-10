@@ -50,15 +50,6 @@ def fit(
     val_loader = make_loader(config, "val")
     val_loader_next = jax.jit(val_loader.next)
 
-    @eqx.filter_value_and_grad
-    def batch_loss(
-        current_model: eqx.Module,
-        batch: PyTree,
-        mask: jax.Array,
-        key: jax.Array,
-    ) -> jax.Array:
-        return loss_fn(current_model, batch, mask, key)
-
     @eqx.filter_jit
     def train_step(
         current_model: eqx.Module,
@@ -66,7 +57,7 @@ def fit(
         mask: jax.Array,
         key: jax.Array,
     ) -> tuple[eqx.Module, jax.Array]:
-        loss, grads = batch_loss(current_model, batch, mask, key)
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(current_model, batch, mask, key)
         updates = jax.tree_util.tree_map(
             lambda grad: None if grad is None else -config.learning_rate * grad,
             grads,
@@ -74,26 +65,8 @@ def fit(
         new_model = eqx.apply_updates(current_model, updates)
         return new_model, loss
 
-    @eqx.filter_jit
-    def eval_step(
-        current_model: eqx.Module,
-        batch: PyTree,
-        mask: jax.Array,
-        key: jax.Array,
-    ) -> jax.Array:
-        return loss_fn(current_model, batch, mask, key)
-
-    metric_step = None
-    if val_metric_fn is not None:
-
-        @eqx.filter_jit
-        def metric_step(
-            current_model: eqx.Module,
-            batch: PyTree,
-            mask: jax.Array,
-            key: jax.Array,
-        ) -> jax.Array:
-            return val_metric_fn(current_model, batch, mask, key)
+    eval_step = eqx.filter_jit(loss_fn)
+    metric_step = eqx.filter_jit(val_metric_fn) if val_metric_fn is not None else None
 
     key = jax.random.key(config.seed)
     key, train_key = jax.random.split(key)
@@ -103,8 +76,6 @@ def fit(
     val_state = val_loader.init_state(val_key)
 
     history: dict[str, list[float]] = {
-        "train": [],
-        "val": [],
         "train_loss": [],
         "val_loss": [],
     }
@@ -122,7 +93,6 @@ def fit(
             model, loss = train_step(model, batch, mask, step_key)
             train_loss += float(loss)
         train_loss /= train_loader.steps_per_epoch
-        history["train"].append(train_loss)
         history["train_loss"].append(train_loss)
 
         log_line = f"epoch={epoch + 1}/{config.epochs} train_loss={train_loss:.3e}"
@@ -135,10 +105,10 @@ def fit(
             loss = eval_step(model, batch, mask, step_key)
             val_loss += float(loss)
             if metric_step is not None:
-                metric_value = metric_step(model, batch, mask, step_key)
+                key, metric_key = jax.random.split(key)
+                metric_value = metric_step(model, batch, mask, metric_key)
                 val_metric += float(metric_value)
         val_loss /= val_loader.steps_per_epoch
-        history["val"].append(val_loss)
         history["val_loss"].append(val_loss)
         log_line += f" val_loss={val_loss:.3e}"
 
@@ -167,15 +137,7 @@ def evaluate(
 ) -> float:
     loader = make_loader(config, "test")
     loader_next = jax.jit(loader.next)
-
-    @eqx.filter_jit
-    def eval_step(
-        current_model: eqx.Module,
-        batch: PyTree,
-        mask: jax.Array,
-        key: jax.Array,
-    ) -> jax.Array:
-        return loss_fn(current_model, batch, mask, key)
+    eval_step = eqx.filter_jit(loss_fn)
 
     key = jax.random.key(config.seed + seed_offset)
     key, loader_key = jax.random.split(key)
@@ -240,12 +202,8 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _model_name(model: eqx.Module) -> str:
-    raw_name = getattr(model, "name", model.__class__.__name__)
-    if callable(raw_name):
-        raw_name = raw_name()
-    name = str(raw_name).strip()
-    if not name:
-        name = model.__class__.__name__
+    raw = getattr(model, "name", None)
+    name = str(raw() if callable(raw) else raw or model.__class__.__name__).strip()
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
     return sanitized or model.__class__.__name__.lower()
 
@@ -263,8 +221,6 @@ def main() -> int:
     config = load_config(args.config)
 
     train_dataset = CovarianceDataset(split="train")
-    val_dataset = CovarianceDataset(split="val")
-    test_dataset = CovarianceDataset(split="test")
     metadata = train_dataset.metadata()
     train_targets = jnp.asarray(train_dataset.as_array_dict()["target_spd"])
 
@@ -285,25 +241,17 @@ def main() -> int:
         geometry=geometry,
         base_matrix=base_matrix,
         beta=config.loss_beta,
-        eps=config.min_eigenvalue,
     )
     riemannian_metric_fn = make_riemannian_distance_metric(
         input_key="context_spd",
         target_key="target_spd",
         prediction_fn=prediction_fn,
-        eps=config.min_eigenvalue,
     )
 
     output_dir = _make_output_dir(model)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(
-        "dataset sizes:",
-        f"train={len(train_dataset)}",
-        f"val={len(val_dataset)}",
-        f"test={len(test_dataset)}",
-        flush=True,
-    )
+    print(f"dataset sizes: train={len(train_dataset)}", flush=True)
     print(
         "model config:",
         f"n_stocks={metadata['n_stocks']}",
@@ -331,11 +279,8 @@ def main() -> int:
     )
 
     test_loss = evaluate(best_model, loss_fn=loss_fn, config=config, seed_offset=1)
-    test_riemannian = evaluate(
-        best_model, loss_fn=riemannian_metric_fn, config=config, seed_offset=2
-    )
     predicted, actual = predict_dataset(
-        best_model, prediction_fn=prediction_fn, config=config, seed_offset=3
+        best_model, prediction_fn=prediction_fn, config=config, seed_offset=2
     )
 
     riemannian_distances = np.asarray(
@@ -346,6 +291,7 @@ def main() -> int:
             )
         )
     )
+    test_riemannian = float(np.mean(riemannian_distances))
 
     eqx.tree_serialise_leaves(output_dir / "nsde.eqx", best_model)
     np.savez_compressed(

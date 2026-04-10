@@ -37,27 +37,18 @@ def replace_masked_spd_examples(values: jax.Array, mask: jax.Array) -> jax.Array
 # ---------------------------------------------------------------------------
 
 
-def symmetrize(matrix: jax.Array) -> jax.Array:
-    return 0.5 * (matrix + jnp.swapaxes(matrix, -1, -2))
+def project_to_spd(matrix: jax.Array, eps: float = 0.0) -> jax.Array:
+    eigenvalues, eigenvectors = jnp.linalg.eigh(matrix)
+    return (eigenvectors * jnp.clip(eigenvalues, a_min=eps)) @ jnp.swapaxes(eigenvectors, -1, -2)
 
 
-def eigh_clamp(matrix: jax.Array, eps: float = 1e-6) -> tuple[jax.Array, jax.Array]:
-    eigenvalues, eigenvectors = jnp.linalg.eigh(symmetrize(matrix))
-    return jnp.clip(eigenvalues, a_min=eps), eigenvectors
-
-
-def project_to_spd(matrix: jax.Array, eps: float = 1e-6) -> jax.Array:
-    eigenvalues, eigenvectors = eigh_clamp(matrix, eps)
-    return symmetrize((eigenvectors * eigenvalues) @ jnp.swapaxes(eigenvectors, -1, -2))
-
-
-def matrix_sqrt(matrix: jax.Array, eps: float = 1e-6) -> jax.Array:
-    eigenvalues, eigenvectors = eigh_clamp(matrix, eps)
+def matrix_sqrt(matrix: jax.Array) -> jax.Array:
+    eigenvalues, eigenvectors = jnp.linalg.eigh(matrix)
     return (eigenvectors * (eigenvalues**0.5)) @ jnp.swapaxes(eigenvectors, -1, -2)
 
 
-def matrix_inv_sqrt(matrix: jax.Array, eps: float = 1e-6) -> jax.Array:
-    eigenvalues, eigenvectors = eigh_clamp(matrix, eps)
+def matrix_inv_sqrt(matrix: jax.Array) -> jax.Array:
+    eigenvalues, eigenvectors = jnp.linalg.eigh(matrix)
     return (eigenvectors * (eigenvalues**-0.5)) @ jnp.swapaxes(eigenvectors, -1, -2)
 
 
@@ -65,28 +56,24 @@ def inverse_congruence_coords(
     geometry: SPD,
     base: jax.Array,
     point: jax.Array,
-    eps: float = 1e-6,
 ) -> jax.Array:
-    base = project_to_spd(base, eps)
-    point = project_to_spd(point, eps)
-    sqrt_base = matrix_sqrt(base, eps)
-    inv_sqrt_base = matrix_inv_sqrt(base, eps)
+    sqrt_base = matrix_sqrt(base)
+    inv_sqrt_base = matrix_inv_sqrt(base)
     middle = sqrt_base @ point @ sqrt_base
-    sqrt_middle = matrix_sqrt(middle, eps)
+    sqrt_middle = matrix_sqrt(middle)
     group_element = inv_sqrt_base @ sqrt_middle @ inv_sqrt_base
-    eigenvalues, eigenvectors = eigh_clamp(group_element, eps)
+    eigenvalues, eigenvectors = jnp.linalg.eigh(group_element)
     lift = (eigenvectors * jnp.log(eigenvalues)) @ jnp.swapaxes(eigenvectors, -1, -2)
-    return geometry._sym_to_coords(symmetrize(lift))
+    return geometry._sym_to_coords(lift)
 
 
 def affine_invariant_distance(
     predicted: jax.Array,
     target: jax.Array,
-    eps: float = 1e-6,
 ) -> jax.Array:
-    inv_sqrt_target = matrix_inv_sqrt(target, eps)
-    aligned = inv_sqrt_target @ symmetrize(predicted) @ inv_sqrt_target
-    eigenvalues, _ = eigh_clamp(aligned, eps)
+    inv_sqrt_target = matrix_inv_sqrt(target)
+    aligned = inv_sqrt_target @ predicted @ inv_sqrt_target
+    eigenvalues, _ = jnp.linalg.eigh(aligned)
     return jnp.linalg.norm(jnp.log(eigenvalues))
 
 
@@ -136,7 +123,6 @@ def make_georax_chart_loss(
     geometry: SPD,
     base_matrix: jax.Array,
     beta: float = 0.0,
-    eps: float = 1e-6,
 ) -> LossFn:
     def loss_fn(
         model: eqx.Module,
@@ -148,21 +134,15 @@ def make_georax_chart_loss(
         targets = replace_masked_spd_examples(batch[target_key], mask)
         predictions = prediction_fn(model, inputs, key)
         coord_targets = jax.vmap(
-            lambda target: inverse_congruence_coords(geometry, base_matrix, target, eps)
+            lambda target: inverse_congruence_coords(geometry, base_matrix, target)
         )(targets)
         coord_predictions = jax.vmap(
-            lambda predicted: inverse_congruence_coords(
-                geometry, base_matrix, predicted, eps
-            )
+            lambda predicted: inverse_congruence_coords(geometry, base_matrix, predicted)
         )(predictions)
         diff = coord_predictions - coord_targets
         per_example_loss = jnp.mean(diff**2, axis=-1)
         if beta > 0.0:
-            distances = jax.vmap(
-                lambda predicted, target: affine_invariant_distance(
-                    predicted, target, eps
-                )
-            )(predictions, targets)
+            distances = jax.vmap(affine_invariant_distance)(predictions, targets)
             per_example_loss = per_example_loss + beta * (distances**2)
         return masked_mean(per_example_loss, mask)
 
@@ -174,7 +154,6 @@ def make_riemannian_distance_metric(
     input_key: str,
     target_key: str,
     prediction_fn: Callable[[eqx.Module, jax.Array, jax.Array], jax.Array],
-    eps: float = 1e-6,
 ) -> LossFn:
     def metric_fn(
         model: eqx.Module,
@@ -185,9 +164,7 @@ def make_riemannian_distance_metric(
         inputs = replace_masked_spd_examples(batch[input_key], mask)
         targets = replace_masked_spd_examples(batch[target_key], mask)
         predictions = prediction_fn(model, inputs, key)
-        distances = jax.vmap(
-            lambda predicted, target: affine_invariant_distance(predicted, target, eps)
-        )(predictions, targets)
+        distances = jax.vmap(affine_invariant_distance)(predictions, targets)
         return masked_mean(distances, mask)
 
     return metric_fn
